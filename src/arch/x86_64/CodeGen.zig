@@ -1180,19 +1180,24 @@ fn airOptionalPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airUnwrapErrErr(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-    const result: MCValue = if (self.liveness.isUnused(inst))
-        .dead
-    else
-        return self.fail("TODO implement unwrap error union error for {}", .{self.target.cpu.arch});
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
+        const err_union_ty = self.air.typeOf(ty_op.operand);
+        const payload_ty = err_union_ty.errorUnionPayload();
+        const mcv = try self.resolveInst(ty_op.operand);
+        if (!payload_ty.hasCodeGenBits()) break :result mcv;
+        return self.fail("TODO implement unwrap error union error for non-empty payloads", .{});
+    };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
 fn airUnwrapErrPayload(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-    const result: MCValue = if (self.liveness.isUnused(inst))
-        .dead
-    else
-        return self.fail("TODO implement unwrap error union payload for {}", .{self.target.cpu.arch});
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
+        const err_union_ty = self.air.typeOf(ty_op.operand);
+        const payload_ty = err_union_ty.errorUnionPayload();
+        if (!payload_ty.hasCodeGenBits()) break :result MCValue.none;
+        return self.fail("TODO implement unwrap error union payload for non-empty payloads", .{});
+    };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
@@ -2396,19 +2401,35 @@ fn isNonNull(self: *Self, ty: Type, operand: MCValue) !MCValue {
 }
 
 fn isErr(self: *Self, ty: Type, operand: MCValue) !MCValue {
-    _ = ty;
-    _ = operand;
-    // Here you can specialize this instruction if it makes sense to, otherwise the default
-    // will call isNonErr and invert the result.
-    return self.fail("TODO call isNonErr and invert the result", .{});
+    const err_type = ty.errorUnionSet();
+    const payload_type = ty.errorUnionPayload();
+    if (!err_type.hasCodeGenBits()) {
+        return MCValue{ .immediate = 0 }; // always false
+    } else if (!payload_type.hasCodeGenBits()) {
+        if (err_type.abiSize(self.target.*) <= 8) {
+            try self.genBinMathOpMir(.cmp, err_type, operand, MCValue{ .immediate = 0 });
+            return MCValue{ .compare_flags_unsigned = .gt };
+        } else {
+            return self.fail("TODO isErr for errors with size larger than register size", .{});
+        }
+    } else {
+        return self.fail("TODO isErr for non-empty payloads", .{});
+    }
 }
 
 fn isNonErr(self: *Self, ty: Type, operand: MCValue) !MCValue {
-    _ = ty;
-    _ = operand;
-    // Here you can specialize this instruction if it makes sense to, otherwise the default
-    // will call isErr and invert the result.
-    return self.fail("TODO call isErr and invert the result", .{});
+    const is_err_res = try self.isErr(ty, operand);
+    switch (is_err_res) {
+        .compare_flags_unsigned => |op| {
+            assert(op == .gt);
+            return MCValue{ .compare_flags_unsigned = .lte };
+        },
+        .immediate => |imm| {
+            assert(imm == 0);
+            return MCValue{ .immediate = 1 };
+        },
+        else => unreachable,
+    }
 }
 
 fn airIsNull(self: *Self, inst: Air.Inst.Index) !void {
